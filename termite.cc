@@ -604,84 +604,6 @@ static bool is_word_char(gunichar c) {
                                      (c >= 0x80 || strchr(word_char_ascii_punct, (int)c) != NULL)));
 }
 
-template<typename F>
-static void move_backward(VteTerminal *vte, select_info *select, F is_word) {
-    long cursor_col, cursor_row;
-    vte_terminal_get_cursor_position(vte, &cursor_col, &cursor_row);
-
-    auto content = get_text_range(vte, cursor_row, 0, cursor_row, cursor_col);
-
-    if (!content) {
-        return;
-    }
-
-    long length;
-    gunichar *codepoints = g_utf8_to_ucs4(content.get(), -1, nullptr, &length, nullptr);
-
-    if (!codepoints) {
-        return;
-    }
-
-    long count = get_count(select);
-
-    bool in_word = false;
-
-    for (long i = length - 2; i >= 0; i--) {
-        cursor_col--;
-        if (!is_word(codepoints[i - 1])) {
-            if (in_word) {
-                if ( --count == 0 ) {
-                    break;
-                }
-                in_word = false;
-            }
-        } else {
-            in_word = true;
-        }
-    }
-    vte_terminal_set_cursor_position(vte, cursor_col, cursor_row);
-    update_selection(vte, select);
-
-    g_free(codepoints);
-}
-
-static void move_backward_word(VteTerminal *vte, select_info *select) {
-    move_backward(vte, select, is_word_char);
-}
-
-static void move_backward_blank_word(VteTerminal *vte, select_info *select) {
-    move_backward(vte, select, std::not1(std::ref(g_unichar_isspace)));
-}
-
-template<typename F>
-void move_first(VteTerminal *vte, select_info *select, F is_match) {
-    long cursor_col, cursor_row;
-    vte_terminal_get_cursor_position(vte, &cursor_col, &cursor_row);
-
-    const long end_col = vte_terminal_get_column_count(vte) - 1;
-
-    auto content = get_text_range(vte, cursor_row, cursor_col, cursor_row, end_col);
-
-    if (!content) {
-        return;
-    }
-
-    long length;
-    gunichar *codepoints = g_utf8_to_ucs4(content.get(), -1, nullptr, &length, nullptr);
-
-    if (!codepoints) {
-        return;
-    }
-
-    auto iter = std::find_if(codepoints, codepoints + length, is_match);
-    if (iter != codepoints + length) {
-        vte_terminal_set_cursor_position(vte, iter - codepoints, cursor_row);
-        update_selection(vte, select);
-    }
-
-    g_free(codepoints);
-}
-
 static void set_cursor_column(VteTerminal *vte, const select_info *select, long column) {
     long cursor_row;
     vte_terminal_get_cursor_position(vte, nullptr, &cursor_row);
@@ -689,39 +611,14 @@ static void set_cursor_column(VteTerminal *vte, const select_info *select, long 
     update_selection(vte, select);
 }
 
-static void move_to_eol(VteTerminal *vte, select_info *select) {
-    long cursor_row;
-    vte_terminal_get_cursor_position(vte, nullptr, &cursor_row);
-
-    const long end_col = vte_terminal_get_column_count(vte) - 1;
-
-    auto content = get_text_range(vte, cursor_row, 0, cursor_row, end_col);
-
-    if (!content) {
-        return;
-    }
-
-    long length;
-    gunichar *codepoints = g_utf8_to_ucs4(content.get(), -1, nullptr, &length, nullptr);
-
-    if (!codepoints) {
-        return;
-    }
-
-    auto iter = std::find(codepoints, codepoints + length, '\n');
-    set_cursor_column(vte, select, std::max(iter - codepoints - 1l, 0l));
-
-    g_free(codepoints);
-}
-
 template<typename F>
-static void move_forward(VteTerminal *vte, select_info *select, F is_word, bool goto_word_end) {
+static void move_horz(VteTerminal *vte, select_info *select, F where) {
     long cursor_col, cursor_row;
     vte_terminal_get_cursor_position(vte, &cursor_col, &cursor_row);
 
     const long end_col = vte_terminal_get_column_count(vte) - 1;
 
-    auto content = get_text_range(vte, cursor_row, cursor_col, cursor_row, end_col);
+    auto content = get_text_range(vte, cursor_row, 0, cursor_row, end_col);
 
     if (!content) {
         return;
@@ -739,54 +636,130 @@ static void move_forward(VteTerminal *vte, select_info *select, F is_word, bool 
         length--;
     }
 
-    long count = get_count(select);
-
-    bool end_of_word = false;
-
-    if (!goto_word_end) {
-        for (long i = 1; i < length; i++) {
-            if (is_word(codepoints[i - 1])) {
-                if (end_of_word) {
-                    if ( --count == 0 ) {
-                        break;
-                    }
-                    end_of_word = false;
-                }
-            } else {
-                end_of_word = true;
-            }
-            cursor_col++;
+    for (long i = get_count(select); i > 0; i--) {
+        long new_col = where(codepoints, length, cursor_col);
+        if (new_col == cursor_col) {
+            break;
         }
-    } else {
-        for (long i = 2; i <= length; i++) {
-            cursor_col++;
-            if (is_word(codepoints[i - 1]) && !is_word(codepoints[i])) {
-                if ( --count == 0 ) {
-                    break;
-                }
-            }
-        }
+        cursor_col = new_col;
     }
+
     vte_terminal_set_cursor_position(vte, cursor_col, cursor_row);
     update_selection(vte, select);
 
     g_free(codepoints);
 }
 
-static void move_forward_end_word(VteTerminal *vte, select_info *select) {
-    move_forward(vte, select, is_word_char, true);
+static void move_to_eol(VteTerminal *vte, select_info *select) {
+    select->count = 0;
+    move_horz(vte, select, [](gunichar* codepoints, long length, long pos)
+        {
+            return (length > 0) ? length - 1 : 0;
+        });
 }
 
-static void move_forward_end_blank_word(VteTerminal *vte, select_info *select) {
-    move_forward(vte, select, std::not1(std::ref(g_unichar_isspace)), true);
+static void move_to_first(VteTerminal *vte, select_info *select) {
+    select->count = 0;
+    move_horz(vte, select, [](gunichar* codepoints, long length, long pos)
+        {
+            for (pos = 0; pos < length; pos++) {
+                if (!g_unichar_isspace(codepoints[pos])) {
+                    return pos;
+                }
+            }
+            return 0L;
+        });
+}
+
+long word_forward(std::function<bool(gunichar)> is_word, bool gotoEnd,
+            gunichar* codepoints, long length, long pos)
+{
+    if (pos > length) {
+        return pos;
+    }
+    long pos_orig = pos;
+    bool had_word = false;
+    bool had_space = false;
+    while (pos < length) {
+        if (is_word_char(codepoints[pos])) {
+            if (had_space && !gotoEnd) {
+                return pos;
+            }
+            had_word = true;
+        } else {
+
+            if (had_word && gotoEnd) {
+                if (pos - pos_orig > 1)
+                {
+                    return pos-1;
+                }
+                else
+                {
+                    had_word = false;
+                }
+            }
+            had_space = true;
+        }
+        ++pos;
+    }
+    if (had_word && gotoEnd)
+    {
+        return pos-1;
+    }
+    return pos_orig;
 }
 
 static void move_forward_word(VteTerminal *vte, select_info *select) {
-    move_forward(vte, select, is_word_char, false);
+    auto fn = std::bind(word_forward, is_word_char, false, _1, _2, _3);
+    move_horz(vte, select, fn);
 }
 
 static void move_forward_blank_word(VteTerminal *vte, select_info *select) {
-    move_forward(vte, select, std::not1(std::ref(g_unichar_isspace)), false);
+    auto fn = std::bind(word_forward, std::not1(std::ref(g_unichar_isspace)), false, _1, _2, _3);
+    move_horz(vte, select, fn);
+}
+
+static void move_forward_end_word(VteTerminal *vte, select_info *select) {
+    auto fn = std::bind(word_forward, is_word_char, true, _1, _2, _3);
+    move_horz(vte, select, fn);
+}
+
+static void move_forward_end_blank_word(VteTerminal *vte, select_info *select) {
+    auto fn = std::bind(word_forward, std::not1(std::ref(g_unichar_isspace)), true, _1, _2, _3);
+    move_horz(vte, select, fn);
+}
+
+long word_backward(std::function<bool(gunichar)> is_word,
+            gunichar* codepoints, long length, long pos)
+{
+    long pos_orig = pos;
+    if (pos > length) {
+        pos = length;
+    }
+    bool in_word = false;
+    while (--pos >= 0) {
+        if (!is_word_char(codepoints[pos])) {
+            if (in_word) {
+                return pos + 1;
+            }
+        } else {
+            in_word = true;
+        }
+    }
+    if (in_word) {
+        return pos + 1;
+    }
+    return pos_orig;
+}
+
+static void move_backward_word(VteTerminal *vte, select_info *select) {
+    auto fn = std::bind(word_backward, is_word_char, _1, _2, _3);
+    move_horz(vte, select, fn);
+}
+
+static void move_backward_blank_word(VteTerminal *vte, select_info *select) {
+    auto fn = std::bind(word_backward, std::not1(std::ref(g_unichar_isspace)), _1, _2, _3);
+    move_horz(vte, select, fn);
 }
 
 /* {{{ CALLBACKS */
@@ -944,8 +917,7 @@ gboolean key_press_cb(VteTerminal *vte, GdkEventKey *event, keybind_info *info) 
                 info->select.count = info->select.count * 10 + (event->keyval - '0');
                 break;
             case GDK_KEY_asciicircum:
-                set_cursor_column(vte, &info->select, 0);
-                move_first(vte, &info->select, std::not1(std::ref(g_unichar_isspace)));
+                move_to_first(vte, &info->select);
                 break;
             case GDK_KEY_dollar:
             case GDK_KEY_End:
