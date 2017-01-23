@@ -90,8 +90,17 @@ enum class vi_mode {
     visual_block
 };
 
+enum class jump_type {
+    none,
+    forw_to,
+    backw_to,
+    forw_till,
+    backw_till
+};
+
 struct select_info {
     vi_mode mode;
+    jump_type jump;
     long count;
     long begin_col;
     long begin_row;
@@ -762,6 +771,44 @@ static void move_backward_blank_word(VteTerminal *vte, select_info *select) {
     move_horz(vte, select, fn);
 }
 
+static void move_to_forw(VteTerminal *vte, select_info *select, gunichar c, int offset) {
+    move_horz(vte, select, [c,offset](gunichar* codepoints, long length, long pos) {
+            for (int i = 1; pos + i < length-offset; i++) {
+                if (codepoints[pos+i+offset] == c) {
+                    return pos+i;
+                }
+            }
+            return pos;
+        });
+}
+static void move_to_backw(VteTerminal *vte, select_info *select, gunichar c, int offset) {
+    move_horz(vte, select, [c,offset](gunichar* codepoints, long length, long pos) {
+            for (int i = 1; pos - i >= offset; i++) {
+                if (codepoints[pos-i-offset] == c) {
+                    return pos-i;
+                }
+            }
+            return pos;
+        });
+}
+
+static void move_to(VteTerminal *vte, select_info *select, gunichar c) {
+    switch (select->jump) {
+        case jump_type::forw_to:
+            move_to_forw(vte, select, c, 0);
+            break;
+        case jump_type::forw_till:
+            move_to_forw(vte, select, c, 1);
+            break;
+        case jump_type::backw_to:
+            move_to_backw(vte, select, c, 0);
+            break;
+        case jump_type::backw_till:
+            move_to_backw(vte, select, c, 1);
+            break;
+    }
+}
+
 /* {{{ CALLBACKS */
 void window_title_cb(VteTerminal *vte, gboolean *dynamic_title) {
     const char *const title = *dynamic_title ? vte_terminal_get_window_title(vte) : nullptr;
@@ -812,6 +859,14 @@ gboolean key_press_cb(VteTerminal *vte, GdkEventKey *event, keybind_info *info) 
     }
 
     if (info->select.mode != vi_mode::insert) {
+        if (info->select.jump != jump_type::none) {
+            guint32 c = gdk_keyval_to_unicode(event->keyval);
+            if (c) {
+                move_to(vte, &info->select, c);
+            }
+            info->select.jump = jump_type::none;
+            return TRUE;
+        }
         if (modifiers == GDK_CONTROL_MASK) {
             switch (gdk_keyval_to_lower(event->keyval)) {
                 case GDK_KEY_bracketleft:
@@ -895,6 +950,18 @@ gboolean key_press_cb(VteTerminal *vte, GdkEventKey *event, keybind_info *info) 
                 break;
             case GDK_KEY_E:
                 move_forward_end_blank_word(vte, &info->select);
+                break;
+            case GDK_KEY_f:
+                info->select.jump = jump_type::forw_to;
+                break;
+            case GDK_KEY_F:
+                info->select.jump = jump_type::backw_to;
+                break;
+            case GDK_KEY_t:
+                info->select.jump = jump_type::forw_till;
+                break;
+            case GDK_KEY_T:
+                info->select.jump = jump_type::backw_till;
                 break;
             case GDK_KEY_Home:
                 set_cursor_column(vte, &info->select, 0);
@@ -1721,7 +1788,7 @@ int main(int argc, char **argv) {
          overlay_mode::hidden,
          std::vector<url_data>(),
          nullptr},
-        {vi_mode::insert, 0, 0, 0, 0, 0},
+        {vi_mode::insert, jump_type::none, 0, 0, 0, 0, 0},
         {{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 0, 0, 0},
          nullptr, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, -1, config_file, 0},
         gtk_window_fullscreen
