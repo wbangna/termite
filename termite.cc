@@ -101,6 +101,8 @@ enum class jump_type {
 struct select_info {
     vi_mode mode;
     jump_type jump;
+    jump_type last_jump;
+    guint32 last_char;
     long count;
     long begin_col;
     long begin_row;
@@ -806,6 +808,32 @@ static void move_to(VteTerminal *vte, select_info *select, gunichar c) {
         case jump_type::backw_till:
             move_to_backw(vte, select, c, 1);
             break;
+        case jump_type::none:
+            break;
+    }
+}
+
+static jump_type invert_jump(jump_type jump) {
+    switch (jump) {
+        case jump_type::forw_to:
+            return jump_type::backw_to;
+        case jump_type::forw_till:
+            return jump_type::backw_till;
+        case jump_type::backw_to:
+            return jump_type::forw_to;
+        case jump_type::backw_till:
+            return jump_type::forw_till;
+        case jump_type::none:
+            break;
+    }
+    return jump_type::none;
+}
+
+static void jump_again(VteTerminal *vte, select_info *select, bool invert) {
+    if (select->last_char && select->last_jump != jump_type::none) {
+        select->jump = invert ? invert_jump(select->last_jump) : select->last_jump;
+        move_to(vte, select, select->last_char);
+        select->jump = jump_type::none;
     }
 }
 
@@ -863,6 +891,8 @@ gboolean key_press_cb(VteTerminal *vte, GdkEventKey *event, keybind_info *info) 
             guint32 c = gdk_keyval_to_unicode(event->keyval);
             if (c) {
                 move_to(vte, &info->select, c);
+                info->select.last_jump = info->select.jump;
+                info->select.last_char = c;
             }
             info->select.jump = jump_type::none;
             return TRUE;
@@ -962,6 +992,12 @@ gboolean key_press_cb(VteTerminal *vte, GdkEventKey *event, keybind_info *info) 
                 break;
             case GDK_KEY_T:
                 info->select.jump = jump_type::backw_till;
+                break;
+            case GDK_KEY_semicolon:
+                jump_again(vte, &info->select, false);
+                break;
+            case GDK_KEY_comma:
+                jump_again(vte, &info->select, true);
                 break;
             case GDK_KEY_Home:
                 set_cursor_column(vte, &info->select, 0);
@@ -1788,7 +1824,7 @@ int main(int argc, char **argv) {
          overlay_mode::hidden,
          std::vector<url_data>(),
          nullptr},
-        {vi_mode::insert, jump_type::none, 0, 0, 0, 0, 0},
+        {vi_mode::insert, jump_type::none, jump_type::none, 0, 0, 0, 0, 0, 0},
         {{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 0, 0, 0},
          nullptr, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, -1, config_file, 0},
         gtk_window_fullscreen
